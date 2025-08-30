@@ -30,231 +30,307 @@ Standardizing on a systemd hardening framework will enable:
 ## Detailed design
 [design]: #detailed-design
 
-## Core Architecture
+This RFC follows the principles established in [RFC 42 (config-option)][rfc-42] by providing a `settings` option that uses native systemd configuration names while adding a composable preset system for ease of use.
 
-The design introduces a new `systemd.services.<name>.harden` option set that provides both simple presets and granular control over systemd security features.
+### Core Architecture
+
+The design introduces a new `systemd.services.<name>.hardening` option set that provides composable hardening presets and RFC 42-style configuration options for systemd security features.
+
+### Benefits of This Approach
+
+- **Maintainability**: No custom abstractions to maintain - direct systemd compatibility
+- **Composability**: Multiple presets can be layered together
+- **Flexibility**: Any systemd option can be overridden using native names
+- **Discoverability**: Users can reference systemd documentation directly
+- **Future-proof**: Works with new systemd features automatically
+- **Simplicity**: Streamlined implementation using standard library functions
+- **Type safety**: Uses `types.attrsOf types.anything` for maximum flexibility with systemd options
 
 ### Basic Interface
 
 ```nix
-systemd.services.<name>.harden = {
+systemd.services.<name>.hardening = {
   enable = mkOption {
     type = types.bool;
     default = false;
-    description = "Enable basic service hardening";
+    description = "Enable systemd service hardening";
   };
 
-  profile = mkOption {
-    type = types.enum [ "strict" "moderate" "minimal" ];
-    default = "moderate";
-    description = "Hardening profile to apply";
+  presets = mkOption {
+    type = types.listOf types.attrs;
+    default = [];
+    description = ''
+      List of hardening presets to apply. Presets are applied in order,
+      with later presets overriding earlier ones. Each preset must be
+      an attribute set of systemd configuration options.
+    '';
+  };
+
+  settings = mkOption {
+    type = types.attrsOf types.anything;
+    default = {};
+    description = ''
+      Systemd service hardening configuration using native systemd option names.
+      These settings override any preset configuration.
+      See systemd.exec(5) for available options.
+    '';
   };
 };
 ```
 
-### Hardening Profiles
+### Hardening Presets
 
-The framework defines three hardening profiles with increasing levels of restriction:
+The framework provides a collection of composable hardening presets that can be mixed and matched. Each preset focuses on a specific aspect of security, allowing users to build custom hardening configurations.
 
-#### Strict Profile
-
-Maximum security with potential compatibility trade-offs:
+#### Base Security Presets
 
 ```nix
-strict = {
-  # Process isolation
-  PrivateUsers = true;
-  PrivateDevices = true;
-  PrivateTmp = true;
-  PrivateNetwork = true;  # Most restrictive
-  ProtectHome = true;
-  ProtectProc = "invisible";
-  ProcSubset = "pid";
+# Built into systemd-hardening.nix module
+{
+  # Fundamental isolation preset - recommended for all services
+  isolation = {
+    PrivateTmp = true;
+    ProtectKernelTunables = true;
+    ProtectKernelModules = true;
+    ProtectControlGroups = true;
+    NoNewPrivileges = true;
+    RestrictSUIDSGID = true;
+    RestrictRealtime = true;
+    SystemCallArchitectures = "native";
+  };
 
-  # System protection
-  ProtectSystem = "strict";
-  ProtectKernelTunables = true;
-  ProtectKernelModules = true;
-  ProtectKernelLogs = true;
-  ProtectControlGroups = true;
-  ProtectClock = true;
-  ProtectHostname = true;
+  # Process and user isolation
+  processIsolation = {
+    PrivateUsers = true;
+    PrivateDevices = true;
+    ProtectHome = true;
+    ProtectProc = "invisible";
+    ProcSubset = "pid";
+    LockPersonality = true;
+    RemoveIPC = true;
+  };
 
-  # Capabilities and privileges
-  NoNewPrivileges = true;
-  CapabilityBoundingSet = [ "" ];  # No capabilities
-  LockPersonality = true;
-  RemoveIPC = true;
-  RestrictSUIDSGID = true;
+  # Comprehensive filesystem protection
+  filesystemProtection = {
+    ProtectSystem = "strict";
+    NoExecPaths = [ "/" ];
+    ExecPaths = [ "/nix/store" ];
+    UMask = "0077";
+    MemoryDenyWriteExecute = true;
+  };
 
-  # System calls
-  SystemCallFilter = [ "@system-service" "~@privileged" ];
-  SystemCallArchitectures = "native";
-  SystemCallErrorNumber = "EPERM";
+  # Network isolation (default: no network access)
+  networkIsolation = {
+    PrivateNetwork = true;
+    RestrictAddressFamilies = [ "AF_UNIX" ];
+    IPAddressDeny = [ "any" ];
+  };
 
-  # Network restrictions
-  RestrictAddressFamilies = [ "AF_UNIX" ];  # Local only
-  IPAddressDeny = [ "any" ];
+  # System protection against kernel modifications
+  systemProtection = {
+    ProtectKernelLogs = true;
+    ProtectClock = true;
+    ProtectHostname = true;
+    RestrictNamespaces = true;
+  };
 
-  # Execution restrictions
-  NoExecPaths = [ "/" ];
-  ExecPaths = [ "/nix/store" ];
-  MemoryDenyWriteExecute = true;
+  # Strict system call filtering
+  systemCallRestriction = {
+    SystemCallFilter = [ "@system-service" "~@privileged" ];
+    SystemCallErrorNumber = "EPERM";
+  };
 
-  # Namespace restrictions
-  RestrictNamespaces = true;
-  RestrictRealtime = true;
-
-  # File system
-  UMask = "0077";
+  # Remove all capabilities by default
+  noCapabilities = {
+    CapabilityBoundingSet = [ "" ];
+  };
 }
 ```
 
-#### Moderate Profile
-
-Balanced security and compatibility:
+#### Common Preset Combinations
 
 ```nix
-moderate = {
-  # Basic isolation
-  PrivateDevices = true;
-  PrivateTmp = true;
-  ProtectHome = true;
-  ProtectProc = "invisible";
+# Predefined combinations for ease of use
+{
+  # Maximum security - all restrictions enabled
+  strict = lib.mergeAttrsList [
+    hardeningPresets.isolation
+    hardeningPresets.processIsolation
+    hardeningPresets.filesystemProtection
+    hardeningPresets.networkIsolation
+    hardeningPresets.systemProtection
+    hardeningPresets.systemCallRestriction
+    hardeningPresets.noCapabilities
+  ];
 
-  # System protection
-  ProtectSystem = "full";
-  ProtectKernelTunables = true;
-  ProtectKernelModules = true;
-  ProtectKernelLogs = true;
-  ProtectControlGroups = true;
-  ProtectClock = true;
+  # Balanced security and compatibility
+  moderate = lib.mergeAttrsList [
+    hardeningPresets.isolation
+    hardeningPresets.processIsolation
+    hardeningPresets.systemProtection
+    {
+      # More permissive filesystem access
+      ProtectSystem = "full";
+      UMask = "0027";
+      # Allow basic networking by default
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+      # Basic system call filtering
+      SystemCallFilter = [ "@system-service" ];
+    }
+  ];
 
-  # Basic privilege restrictions
-  NoNewPrivileges = true;
-  LockPersonality = true;
-  RestrictSUIDSGID = true;
-
-  # System calls
-  SystemCallFilter = [ "@system-service" ];
-  SystemCallArchitectures = "native";
-
-  # Network (less restrictive)
-  RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
-
-  # Namespace restrictions
-  RestrictNamespaces = true;
-  RestrictRealtime = true;
-
-  # File permissions
-  UMask = "0027";
+  # Minimal hardening for maximum compatibility
+  minimal = hardeningPresets.isolation;
 }
 ```
 
-#### Minimal Profile
+#### Functional Presets
 
-Light hardening with maximum compatibility:
+Presets can also be functions that accept parameters for customization:
 
 ```nix
-minimal = {
-  # Basic protections
-  PrivateTmp = true;
-  ProtectKernelTunables = true;
-  ProtectKernelModules = true;
-  ProtectControlGroups = true;
+{
+  # Allow specific network access
+  allowNetwork = {
+    addressFamilies ? [ "AF_UNIX" "AF_INET" "AF_INET6" ],
+    bindService ? false
+  }: {
+    PrivateNetwork = false;
+    RestrictAddressFamilies = addressFamilies;
+    IPAddressDeny = null;
+  } // lib.optionalAttrs bindService {
+    CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
+  };
 
-  # Basic restrictions
-  NoNewPrivileges = true;
-  RestrictSUIDSGID = true;
-  RestrictRealtime = true;
+  # Allow access to specific devices
+  allowDevices = { devices }: {
+    PrivateDevices = false;
+    DeviceAllow = devices;
+  };
 
-  # System calls
-  SystemCallArchitectures = "native";
+  # Allow access to specific paths
+  allowPaths = { readWrite ? [], readOnly ? [], exec ? [] }: {
+    ReadWritePaths = readWrite;
+    BindReadOnlyPaths = readOnly;
+    ExecPaths = [ "/nix/store" ] ++ exec;
+  };
+
+  # Allow specific capabilities
+  allowCapabilities = { capabilities }: {
+    CapabilityBoundingSet = capabilities;
+  };
+
+  # Allow additional system calls
+  allowSyscalls = { syscalls }: {
+    SystemCallFilter = [ "@system-service" ] ++ syscalls;
+  };
 }
 ```
 
-**Note on Profile Evolution**: The specific settings within each hardening profile (strict, moderate, and minimal) are not set in stone. These profiles are designed to evolve and be refined during the implementation and rollout phases based on real-world testing, community feedback, and compatibility requirements. The profiles represent starting points that balance security and usability, but their contents may be adjusted to better serve the NixOS ecosystem as we gain experience with their practical application.
+**Note on Preset Evolution**: The specific presets and their contents are designed to evolve based on real-world testing, community feedback, and compatibility requirements. New presets can be added, and existing ones refined as we gain experience with their practical application.
 
-### Fine-Grained Control
+### Composable Configuration
 
-For services requiring specific permissions:
+The framework allows combining presets with RFC 42-style overrides:
 
 ```nix
-systemd.services.<name>.harden = {
+systemd.services.<name>.hardening = {
   enable = true;
-  profile = "strict";
 
-  # Override specific restrictions
-  allowNetwork = true;           # Sets PrivateNetwork = false, appropriate RestrictAddressFamilies
-  allowHome = true;              # Sets ProtectHome = false
-  allowDevices = [ "/dev/tty" ]; # Sets DeviceAllow for specific devices
+  # Apply base security with network access
+  presets = [
+    hardeningPresets.strict
+    (hardeningPresets.allowNetwork {
+      addressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+      bindService = true;
+    })
+    (hardeningPresets.allowPaths {
+      readWrite = [ "/var/lib/myservice" ];
+      readOnly = [ "/etc/ssl" ];
+    })
+  ];
 
-  # Additional capabilities when needed
-  capabilities = [ "CAP_NET_BIND_SERVICE" ];
+  # Override specific settings using systemd option names
+  settings = {
+    # Fine-tune system call filtering
+    SystemCallFilter = [
+      "@system-service"
+      "@network-io"
+      "~@privileged"
+      "~@resources"
+    ];
 
-  # Custom paths
-  execPaths = [ "/usr/bin" ];                # Allow execution from additional paths
-  readWritePaths = [ "/var/lib/myservice" ]; # Additional writable directories
+    # Allow specific capabilities beyond what presets provide
+    CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" "CAP_SETUID" ];
 
-  # Service-specific syscalls
-  additionalSyscalls = [ "@network-io" ];
+    # Custom file permissions
+    UMask = "0022";
 
-  # Custom address families
-  addressFamilies = [ "AF_NETLINK" ];
+    # Service-specific device access
+    DeviceAllow = [ "/dev/urandom r" ];
+  };
 };
 ```
 
 ### Implementation Strategy
 
-The implementation extends the existing `systemd.services` option with a new `harden` submodule:
+The implementation extends the existing `systemd.services` option with a new `hardening` submodule that follows RFC 42 patterns:
 
 ```nix
 { lib, ... }:
 let
   inherit (lib) types;
 
-  # Hardening profile definitions
-  hardeningProfiles = {
-    strict = { /* comprehensive hardening settings */ };
-    moderate = { /* balanced hardening settings */ };
-    minimal = { /* basic hardening settings */ };
+  # Hardening preset library
+  hardeningPresets = {
+    # Base presets (isolation, processIsolation, etc.)
+    # Functional presets (allowNetwork, allowPaths, etc.)
+    # Preset combinations (strict, moderate, minimal)
   };
 
 in {
+  # Export hardening presets for use in service configurations
+  _module.args.hardeningPresets = hardeningPresets;
+
   options.systemd.services = lib.mkOption {
     type = types.attrsOf (types.submodule ({ name, config, ... }: {
-      options.harden = {
+      options.hardening = {
         enable = lib.mkOption {
           type = types.bool;
           default = false;
           description = "Enable systemd service hardening";
         };
 
-        profile = lib.mkOption {
-          type = types.enum [ "strict" "moderate" "minimal" ];
-          default = "moderate";
-          description = "Hardening profile to apply";
+        presets = lib.mkOption {
+          type = types.listOf types.attrs;
+          default = [];
+          description = ''
+            List of hardening presets to apply. Presets are applied in order,
+            with later presets overriding earlier ones.
+          '';
         };
 
-        allowNetwork = lib.mkOption {
-          type = types.bool;
-          default = false;
-          description = "Allow network access by disabling PrivateNetwork";
+        settings = lib.mkOption {
+          type = types.attrsOf types.anything;
+          default = {};
+          description = ''
+            Systemd service hardening configuration using native systemd option names.
+            These settings override any preset configuration.
+            See systemd.exec(5) for available options.
+          '';
         };
-
-        # Other hardening options
       };
 
-      config.serviceConfig = lib.optionalAttrs config.harden.enable (
+      config.serviceConfig = lib.optionalAttrs config.hardening.enable (
         let
-          hardenCfg = config.harden;
-          baseProfile = hardeningProfiles.${hardenCfg.profile};
+          hardeningCfg = config.hardening;
 
-          # Apply conditional overrides based on harden options
-          overrides = /* logic to override profile settings based on allow* options */;
+          # Merge all presets and custom settings
+          finalSettings = lib.filterAttrs (n: v: v != null) (
+            lib.mergeAttrsList (hardeningCfg.presets ++ [ hardeningCfg.settings ])
+          );
         in
-        # Merge base profile with conditional overrides
-        lib.mapAttrs (name: value: lib.mkDefault value) baseProfile // overrides
+        lib.mapAttrs (name: value: lib.mkDefault value) finalSettings
       );
     }));
   };
@@ -265,26 +341,36 @@ in {
 
 - Phase 1: Framework Introduction
 
-  - Add hardening framework to systemd module
+  - Add hardening framework to systemd module with preset library
   - No services enabled by default
   - Documentation, tests, and examples provided
+  - RFC 42-style `settings` option for full systemd compatibility
 
-- Phase 2: Existing Hardened Services
+- Phase 2: Preset Development and Refinement
+
+  - Develop and test composable hardening presets
+  - Create functional presets for common use cases
+  - Gather community feedback on preset effectiveness and usability
+  - Refine preset compositions based on real-world usage
+
+- Phase 3: Existing Service Migration
 
   - Identify existing services with custom hardening
-  - Migrate them to use the new framework
+  - Migrate them to use appropriate preset combinations
+  - Create service-specific presets where beneficial
 
-- Phase 3: Broader Adoption
+- Phase 4: Broader Adoption
 
-  - Enable hardening for additional services
-  - Community contributions for service-specific configurations
+  - Enable hardening for additional services using preset combinations
+  - Community contributions for new presets and preset refinements
+  - Documentation of best practices and common patterns
 
-- Phase 4: Default Hardening (Long-term)
+- Phase 5: Default Hardening (Long-term)
 
-  - Consider enabling minimal hardening by default for new services
-  - Opt-out rather than opt-in for basic protections
+  - Consider enabling basic hardening presets by default for new services
+  - Opt-out rather than opt-in for fundamental protections
 
-During Phases 1 and 2, the hardening profile definitions (strict, moderate, and minimal) will be actively refined based on real-world testing, compatibility feedback, and community input.
+During all phases, the preset library and RFC 42-style settings will be actively refined based on real-world testing, compatibility feedback, and community input. The composable nature allows for incremental improvements without breaking existing configurations.
 
 ### Testing and Validation
 
@@ -303,11 +389,14 @@ makeTest {
   machine = {
     services.postgresql = {
       enable = true;
-      harden = {
-        enable = true;
-        profile = "strict";
-        allowNetwork = true;
-      };
+    };
+
+    systemd.services.postgresql.hardening = {
+      enable = true;
+      presets = [
+        config.systemd.hardeningPresets.strict
+        (config.systemd.hardeningPresets.allowNetwork { addressFamilies = [ "AF_UNIX" "AF_INET" ]; })
+      ];
     };
   };
 
@@ -332,103 +421,172 @@ makeTest {
 
 ### Basic Usage
 
-Enable hardening for a simple service:
+Enable hardening for a simple service using predefined presets:
 
 ```nix
-systemd.services.myapp = {
-  enable = true;
-  description = "My Application";
-  serviceConfig.ExecStart = "${pkgs.myapp}/bin/myapp";
-
-  harden = {
+{ hardeningPresets, ... }:
+{
+  systemd.services.myapp = {
     enable = true;
-    profile = "moderate";
+    description = "My Application";
+    serviceConfig.ExecStart = "${pkgs.myapp}/bin/myapp";
+
+    hardening = {
+      enable = true;
+      presets = [ hardeningPresets.moderate ];
+    };
   };
-};
+}
 ```
 
 ### Network Service
 
-Configure a web service that needs network access:
+Configure a web service that needs network access and privilege binding:
 
 ```nix
-systemd.services.webapp = {
-  enable = true;
-  description = "Web Application";
-  serviceConfig.ExecStart = "${pkgs.webapp}/bin/webapp";
-
-  harden = {
+{ hardeningPresets, ... }:
+{
+  systemd.services.webapp = {
     enable = true;
-    profile = "strict";
-    allowNetwork = true;
-    capabilities = [ "CAP_NET_BIND_SERVICE" ];  # Bind to port 80/443
-    readWritePaths = [ "/var/lib/webapp" ];
+    description = "Web Application";
+    serviceConfig.ExecStart = "${pkgs.webapp}/bin/webapp";
+
+    hardening = {
+      enable = true;
+      presets = [
+        hardeningPresets.strict
+        (hardeningPresets.allowNetwork { bindService = true; })
+        (hardeningPresets.allowPaths {
+          readWrite = [ "/var/lib/webapp" ];
+          readOnly = [ "/etc/ssl/certs" ];
+        })
+      ];
+    };
   };
-};
-```
-
-### Database Service
-
-The existing PostgreSQL service configuration may look like this when migrated to the new hardening framework:
-
-```nix
-systemd.services.postgresql = {
-  harden = {
-    enable = true;
-    profile = "strict";
-    allowNetwork = true;
-  };
-};
+}
 ```
 
 ### Legacy Service Migration
 
-For services that need extensive filesystem access:
+For services that need extensive permissions, start minimal and add as needed:
 
 ```nix
-systemd.services.legacy-daemon = {
-  description = "Legacy System Daemon";
-  serviceConfig.ExecStart = "${pkgs.legacy-daemon}/bin/daemon";
+{ hardeningPresets, ... }:
+{
+  systemd.services.legacy-daemon = {
+    description = "Legacy System Daemon";
+    serviceConfig.ExecStart = "${pkgs.legacy-daemon}/bin/daemon";
 
-  harden = {
-    enable = true;
-    profile = "minimal";  # Start with light restrictions
-    allowHome = true;     # Needs access to user directories
-    allowDevices = [ "/dev/tty" "/dev/pts" ];
-    execPaths = [ "/usr/bin" "/usr/local/bin" ];
+    hardening = {
+      enable = true;
+      presets = [ hardeningPresets.minimal ];
+
+      settings = {
+        # Legacy service needs broad access - override as needed
+        ProtectHome = false;
+        ProtectSystem = false;
+        PrivateDevices = false;
+      };
+    };
   };
-};
+}
+```
+
+### Custom Preset Definition
+
+Create reusable custom presets for module-specific requirements:
+
+```nix
+# In a custom module or configuration
+{ hardeningPresets, ... }:
+let
+  myModulePresets = {
+    webService = {
+      # Common settings for all web services
+      PrivateNetwork = false;
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+      CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
+      SystemCallFilter = [ "@system-service" "@network-io" ];
+    };
+
+    allowLogging = {
+      # Allow access to logging infrastructure
+      BindReadOnlyPaths = [ "/dev/log" ];
+      RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+    };
+  };
+in {
+  systemd.services.mywebapp = {
+    hardening = {
+      enable = true;
+      presets = [
+        hardeningPresets.isolation
+        hardeningPresets.processIsolation
+        myModulePresets.webService
+        myModulePresets.allowLogging
+      ];
+    };
+  };
+}
 ```
 
 ### Fine-Tuned Service
 
-Advanced configuration for a security-critical service:
+Security-critical service with minimal attack surface:
 
 ```nix
-systemd.services.crypto-service = {
-  enable = true;
-  description = "Cryptographic Service";
-  serviceConfig.ExecStart = "${pkgs.crypto-service}/bin/crypto-service";
-
-  harden = {
+{ hardeningPresets, ... }:
+{
+  systemd.services.crypto-service = {
     enable = true;
-    profile = "strict";
+    description = "Cryptographic Service";
+    serviceConfig.ExecStart = "${pkgs.crypto-service}/bin/crypto-service";
 
-    # Only allow specific system calls
-    systemCallFilter = [
-      "@system-service"
-      "~@privileged"
-      "~@resources"
-      "~@obsolete"
-    ];
+    hardening = {
+      enable = true;
+      presets = [
+        hardeningPresets.isolation
+        hardeningPresets.processIsolation
+        hardeningPresets.filesystemProtection
+        hardeningPresets.networkIsolation
+        hardeningPresets.systemProtection
+        hardeningPresets.noCapabilities
+      ];
 
-    # Minimal capabilities
-    capabilities = [ ];
+      settings = {
+        # Only allow specific system calls needed for cryptography
+        SystemCallFilter = [
+          "@system-service"
+          "getrandom"
+          "~@privileged"
+          "~@resources"
+          "~@obsolete"
+          "~@debug"
+          "~@mount"
+          "~@cpu-emulation"
+          "~@raw-io"
+          "~@reboot"
+          "~@swap"
+          "~@module"
+        ];
 
-    # Specific network restrictions
-    addressFamilies = [ "AF_UNIX" ];
+        # Prevent any capability inheritance
+        CapabilityBoundingSet = [ "" ];
+        AmbientCapabilities = [ "" ];
+
+        # Maximum filesystem isolation
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+
+        # Only allow access to specific paths
+        ReadWritePaths = [ "/var/lib/crypto-service" ];
+        InaccessiblePaths = [ "/home" "/root" "/opt" ];
+      };
+    };
   };
-};
+}
 ```
 
 ## Drawbacks
@@ -514,6 +672,15 @@ Use tools like AppArmor, SELinux, or seccomp-bpf for service restriction.
 ## Prior art
 [prior-art]: #prior-art
 
+### RFC 42 - Config Option Pattern
+
+This RFC builds upon [RFC 42 (config-option)][rfc-42], which established the pattern of using structural `settings` options instead of stringly-typed `extraConfig` options. Our design follows RFC 42's guidance by:
+
+- Providing a `settings` option that accepts structured Nix values
+- Using native systemd option names rather than custom abstractions
+- Enabling proper merging and inspection of configuration
+- Supporting preset combinations as recommended for balancing option count
+
 ### Existing Implementations
 
 - **Current NixOS Services**: Many services like PostgreSQL, Murmur, and Nginx already implement custom hardening
@@ -539,11 +706,13 @@ Use tools like AppArmor, SELinux, or seccomp-bpf for service restriction.
 ## Unresolved questions
 [unresolved]: #unresolved-questions
 
-- **Default Behavior**: Should hardening be enabled by default for new services?
-- **Profile Evolution**: How should hardening profiles evolve over time without breaking existing configurations?
+- **Default Behavior**: Should basic hardening presets be enabled by default for new services?
+- **Preset Evolution**: How should hardening presets evolve over time without breaking existing configurations?
+- **Preset Discovery**: What's the best way to help users discover available presets and their purposes?
 - **Service Dependencies**: How to handle services that depend on each other with different hardening requirements?
 - **User Services**: Should this framework extend to user-level systemd services?
 - **Debugging**: What tools and techniques should be provided for debugging hardening-related issues?
+- **Preset Organization**: How should presets be organized and categorized as the library grows?
 
 ## Future work
 [future]: #future-work
@@ -559,3 +728,4 @@ Use tools like AppArmor, SELinux, or seccomp-bpf for service restriction.
 [nixos-discourse-pre-rfc]: https://discourse.nixos.org/t/pre-rfc-systemd-hardening/39772
 [nixos-pr-hardening]: https://github.com/NixOS/nixpkgs/pull/288418
 [nixos-issue-hardening]: https://github.com/NixOS/nixpkgs/issues/377827
+[rfc-42]: https://github.com/NixOS/rfcs/blob/master/rfcs/0042-config-option.md
