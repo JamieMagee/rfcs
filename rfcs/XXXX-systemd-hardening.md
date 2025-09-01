@@ -44,7 +44,7 @@ The design introduces a new `systemd.services.<name>.hardening` option set that 
 - **Discoverability**: Users can reference systemd documentation directly
 - **Future-proof**: Works with new systemd features automatically
 - **Simplicity**: Streamlined implementation using standard library functions
-- **Type safety**: Uses `types.attrsOf types.anything` for maximum flexibility with systemd options
+- **Type safety**: Uses `types.attrsOf unitOption` for proper systemd option handling and merging
 
 ### Basic Interface
 
@@ -67,7 +67,7 @@ systemd.services.<name>.hardening = {
   };
 
   settings = mkOption {
-    type = types.attrsOf types.anything;
+    type = types.attrsOf systemdUtils.unitOptions.unitOption;
     default = {};
     description = ''
       Systemd service hardening configuration using native systemd option names.
@@ -277,9 +277,10 @@ systemd.services.<name>.hardening = {
 The implementation extends the existing `systemd.services` option with a new `hardening` submodule that follows RFC 42 patterns:
 
 ```nix
-{ lib, ... }:
+{ lib, systemdUtils, ... }:
 let
   inherit (lib) types;
+  inherit (systemdUtils.lib) unitOption;
 
   # Hardening preset library
   hardeningPresets = {
@@ -311,7 +312,7 @@ in {
         };
 
         settings = lib.mkOption {
-          type = types.attrsOf types.anything;
+          type = types.attrsOf unitOption;
           default = {};
           description = ''
             Systemd service hardening configuration using native systemd option names.
